@@ -91,6 +91,7 @@ class HUD:
         self.control_info = tk.StringVar(value="Controle de câmera: desligado")
         self.last_move_at = 0.0
         self.mouse_failure_warned = False
+        self.last_control_notice_at = 0.0
         self._build_ui()
         self._init_hotkeys()
         self.root.after(80, self._poll)
@@ -149,7 +150,8 @@ class HUD:
         tk.Scale(speed, from_=0.03, to=0.48, resolution=0.01, orient="horizontal",
                  length=270, variable=self.mouse_gain, bg=DARK, fg=TEXT,
                  highlightthickness=0, troughcolor=PANEL).pack(side="left")
-        self._label(speed, "Apenas alvo selecionado. ESC solta; P liga/desliga.",
+        self._button(speed, "Testar mouse no Windows", self.test_mouse).pack(side="left", padx=8)
+        self._label(speed, "ESC solta; P liga/desliga.",
                     ("Segoe UI", 9), fg="#f8c58c").pack(side="left", padx=10)
 
         self.canvas = tk.Canvas(self.root, width=PREVIEW_W, height=PREVIEW_H,
@@ -201,6 +203,24 @@ class HUD:
             self.info.set(f"Atalhos globais indisponíveis ({exc}). Use os botões da janela.")
             self.root.bind_all("<KeyPress-p>", lambda event: self.toggle_follow())
             self.root.bind_all("<Escape>", lambda event: self.release_target())
+
+    def test_mouse(self):
+        """Teste local do SendInput no Windows, sem Fortnite em foco."""
+        self.release_target()
+        if sys.platform != "win32":
+            self.info.set("Teste indisponível: funciona apenas no Windows.")
+            return
+        ok = mover_relativo(70, 0)
+        if ok:
+            self.info.set(
+                "Teste local: Windows aceitou +70 px de mouse. "
+                "Veja se o ponteiro andou. Isso não garante movimento no Fortnite."
+            )
+        else:
+            self.info.set(
+                "Teste local falhou: Windows rejeitou o evento de mouse. "
+                "Não tente desativar proteções de segurança."
+            )
 
     def select_video(self):
         path = filedialog.askopenfilename(title="Escolha um vídeo", filetypes=[
@@ -350,6 +370,10 @@ class HUD:
         if not self.following or not self.enable_mouse.get() or self.source.get() != "tela":
             return
         if self.only_fortnite.get() and not janela_fortnite_ativa():
+            now = time.monotonic()
+            if now - self.last_control_notice_at > 2.0:
+                self.last_control_notice_at = now
+                self.info.set("Movimento pausado: Fortnite não está em primeiro plano.")
             return
         # Evita enviar entradas em alta frequência, que causariam trepidação.
         now = time.monotonic()
@@ -366,6 +390,12 @@ class HUD:
             return
         ok = mover_relativo(dx, dy)
         self.last_move_at = now
+        if ok and now - self.last_control_notice_at > 3.0:
+            self.last_control_notice_at = now
+            self.info.set(
+                "Windows recebeu movimento do mouse; o Fortnite pode ignorar. "
+                "ESC interrompe."
+            )
         if not ok and not self.mouse_failure_warned:
             self.mouse_failure_warned = True
             self.following = False
