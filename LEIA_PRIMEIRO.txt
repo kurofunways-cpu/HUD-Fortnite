@@ -1,35 +1,32 @@
-HUD V7 — RASTREAMENTO AUTOMÁTICO CONTÍNUO (EXPERIMENTAL)
+HUD V8 — YOLO + FLUXO ÓPTICO (EXPERIMENTAL)
 
-O programa liga o rastreamento automaticamente quando você clica em Iniciar prévia.
-NÃO precisa desenhar quadrados nem selecionar personagens.
+NOVIDADE
+- YOLO encontra personagens; OpenCV acompanha movimentos entre as detecções.
+- O controle não precisa esperar uma nova detecção YOLO em cada movimento.
+- A prévia mostra YOLO FPS e Fluxo FPS para identificar lentidão no computador.
+- O rastreamento liga automaticamente após Iniciar prévia.
+- P pausa ou retoma; ESC pausa.
+- Não precisa marcar quadrados nem escolher personagem manualmente.
 
-ATUALIZAÇÃO (SEM REINSTALAR AS BIBLIOTECAS)
+ATUALIZAR SEM REINSTALAR
 1. Feche o HUD.
-2. Execute atualizar.bat na pasta do programa.
-3. Aguarde a mensagem de conclusão.
-4. Execute iniciar.bat. A pasta .venv é preservada.
+2. Execute atualizar.bat, na mesma pasta do app.py.
+3. Execute iniciar.bat.
+4. A pasta .venv será preservada. O novo rastreamento está dentro do app.py.
+5. Não precisa instalar bibliotecas novas.
 
-CONTROLES
-- Iniciar prévia: liga o rastreamento automaticamente.
-- P: pausa ou retoma a procura e o acompanhamento do alvo.
-- ESC: pausa imediatamente; para retomar, aperte P.
-- Parar: encerra a captura.
-- Minimizar: oculta a interface na barra de tarefas; não para a captura.
+TESTE E DIAGNÓSTICO
+1. Selecione Tela ao vivo e clique em Iniciar prévia.
+2. Volte ao Fortnite e observe, quando possível, os indicadores YOLO FPS e Fluxo FPS.
+3. P pausa/retoma, ESC pausa.
+4. Se o Fluxo FPS ficar perto de zero, o rastreamento leve não iniciou ou perdeu os pontos.
+5. Se YOLO FPS estiver muito baixo, o reconhecimento pode demorar para selecionar o alvo.
 
-O QUE MUDOU
-- Aquisição automática do personagem visível mais próximo do centro.
-- Mantém o mesmo alvo por ID, tentando recuperar pela posição se o ID mudar.
-- Espera brevemente quando o alvo desaparece, antes de escolher outro.
-- Menor espera entre as tentativas de movimento do mouse.
-- Suavização dinâmica: resposta mais rápida longe do centro, mais suave perto.
-- Atualiza o controle independentemente do desenho da prévia.
-- Usa a GPU NVIDIA quando PyTorch/CUDA estiver disponível; senão usa CPU.
-
-LIMITAÇÕES IMPORTANTES
-- YOLO genérico detecta pessoas e não identifica equipes: pode seguir inimigos.
-- Ao perder a visão do alvo, não há garantia de que ele será recuperado.
-- A velocidade e precisão dependem do hardware e de o jogo aceitar SendInput.
-- Não lê memória, não injeta código, não altera o anticheat.
-- Pode não funcionar no Fortnite Battle Royale e pode violar regras do jogo.
-- Não desative Smart App Control, Defender ou sistemas anticheat.
-- Mudanças de código não foram testadas dentro do Fortnite.
+LIMITAÇÕES
+- Modelo genérico detecta pessoas e não diferencia aliados de inimigos.
+- Fluxo óptico acompanha pontos visuais; pode perder a pessoa por obstáculos,
+  mudanças bruscas, animações ou movimentos rápidos.
+- Ele não garante que a mira fique presa em um personagem.
+- Simular mouse não garante que o Fortnite mova a câmera.
+- É um experimento não testado em partida de Fortnite; pode violar regras e
+  causar penalidades. Não desative proteções do Windows nem o anticheat.
