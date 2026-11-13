@@ -7,6 +7,8 @@ ignorar os eventos de mouse. Use por sua conta e risco; pode violar as regras.
 from __future__ import annotations
 
 import queue
+import cv2
+import numpy as np
 import sys
 import threading
 import time
@@ -60,6 +62,108 @@ def choose_box(detections, x, y):
     return min(candidates, key=lambda t: t[0])[1] if candidates else None
 
 
+class FluxoRapido:
+    def __init__(self):
+        self.gray = None
+        self.points = None
+        self.box = None
+        self.frames = 0
+
+    def reset(self):
+        self.gray = None
+        self.points = None
+        self.box = None
+        self.frames = 0
+
+    @staticmethod
+    def _clip_box(box, width, height):
+        x1, y1, x2, y2 = box
+        x1 = int(max(0, min(width - 1, x1)))
+        y1 = int(max(0, min(height - 1, y1)))
+        x2 = int(max(x1 + 1, min(width, x2)))
+        y2 = int(max(y1 + 1, min(height, y2)))
+        return x1, y1, x2, y2
+
+    def _features(self, gray):
+        if self.box is None:
+            return None
+        height, width = gray.shape[:2]
+        x1, y1, x2, y2 = self._clip_box(self.box, width, height)
+        bw, bh = x2 - x1, y2 - y1
+        if bw < 10 or bh < 12:
+            return None
+        inset_x = min(int(bw * .15), 20)
+        inset_y = min(int(bh * .12), 24)
+        xa, xb = x1 + inset_x, x2 - inset_x
+        ya, yb = y1 + inset_y, y2 - inset_y
+        if xb - xa < 8 or yb - ya < 8:
+            xa, xb, ya, yb = x1, x2, y1, y2
+        roi = gray[ya:yb, xa:xb]
+        corners = cv2.goodFeaturesToTrack(
+            roi, maxCorners=65, qualityLevel=.013, minDistance=5, blockSize=5)
+        if corners is None or len(corners) < 4:
+            return None
+        corners[:, 0, 0] += xa
+        corners[:, 0, 1] += ya
+        return corners.astype(np.float32)
+
+    def seed(self, frame, box):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.reset()
+        self.box = self._clip_box(box, frame.shape[1], frame.shape[0])
+        self.points = self._features(gray)
+        self.gray = gray
+        return self.points is not None
+
+    def update(self, frame):
+        if self.gray is None or self.points is None or self.box is None:
+            return None
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        next_points, status, errors = cv2.calcOpticalFlowPyrLK(
+            self.gray, gray, self.points, None, winSize=(21, 21),
+            maxLevel=3,
+            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 18, .02))
+        if next_points is None or status is None:
+            self.reset()
+            return None
+        good = status.reshape(-1) == 1
+        if errors is not None:
+            good &= errors.reshape(-1) < 38
+        new_pts = next_points.reshape(-1, 2)[good]
+        old_pts = self.points.reshape(-1, 2)[good]
+        if len(new_pts) < 4:
+            self.reset()
+            return None
+        flows = new_pts - old_pts
+        median = np.median(flows, axis=0)
+        residual = np.linalg.norm(flows - median, axis=1)
+        ok = residual < 9.0
+        if int(ok.sum()) < 4:
+            self.reset()
+            return None
+        median = np.median(flows[ok], axis=0)
+        dx, dy = float(median[0]), float(median[1])
+        width, height = frame.shape[1], frame.shape[0]
+        if abs(dx) > width * .16 or abs(dy) > height * .16:
+            self.reset()
+            return None
+        x1, y1, x2, y2 = self.box
+        shifted = (x1 + dx, y1 + dy, x2 + dx, y2 + dy)
+        if (shifted[2] < 5 or shifted[0] > width - 5
+                or shifted[3] < 5 or shifted[1] > height - 5):
+            self.reset()
+            return None
+        self.box = self._clip_box(shifted, width, height)
+        self.frames += 1
+        self.gray = gray
+        self.points = new_pts[ok].reshape(-1, 1, 2).astype(np.float32)
+        if self.frames % 8 == 0 or len(self.points) < 9:
+            fresh = self._features(gray)
+            if fresh is not None:
+                self.points = fresh
+        return self.box
+
+
 class HUD:
     def __init__(self):
         self.root = tk.Tk()
@@ -67,7 +171,8 @@ class HUD:
         self.root.geometry("1030x790+90+70")
         self.root.minsize(1000, 760)
         self.root.configure(bg=DARK)
-        self.messages = queue.Queue(maxsize=3)
+        self.messages = queue.Queue(maxsize=10)
+        self.frame_queue = queue.Queue(maxsize=1)
         self.key_commands = queue.Queue(maxsize=10)
         self.stop_event = threading.Event()
         self.thread = None
@@ -103,6 +208,8 @@ class HUD:
         self.last_flow_seed_at = 0.0
         self.yolo_frames_seen = 0
         self.fast_frames_seen = 0
+        self.metrics_started_at = time.monotonic()
+        self.metrics = tk.StringVar(value="YOLO: — FPS | Fluxo: — FPS")
         self.control_info = tk.StringVar(value="Controle de câmera: desligado")
         self.last_move_at = 0.0
         self.mouse_failure_warned = False
@@ -177,6 +284,8 @@ class HUD:
                                 text="A prévia aparece aqui depois de iniciar", fill="#87a0b7",
                                 font=("Segoe UI", 16))
         self._label(self.root, "Status", ("Segoe UI", 10, "bold"), fg=ACCENT).pack(anchor="w", padx=16, pady=(10, 2))
+        tk.Label(self.root, textvariable=self.metrics, fg="#a8c7da", bg=DARK,
+                 font=("Segoe UI", 9), anchor="w").pack(fill="x", padx=16)
         tk.Label(self.root, textvariable=self.info, font=("Segoe UI", 10), fg=TEXT, bg=DARK,
                  anchor="w").pack(fill="x", padx=16)
         self._label(self.root, "O jogo pode ignorar o movimento do mouse. Não desative o anticheat ou o Smart App Control.",
@@ -247,15 +356,20 @@ class HUD:
 
     def _post(self, kind, payload):
         if kind == "frame":
+            # A prévia não deve apagar erros ou mensagens de diagnóstico.
             try:
                 while True:
-                    self.messages.get_nowait()
+                    self.frame_queue.get_nowait()
             except queue.Empty:
                 pass
+            try:
+                self.frame_queue.put_nowait(payload)
+            except queue.Full:
+                pass
+            return
         try:
             self.messages.put_nowait((kind, payload))
         except queue.Full:
-            # Evita bloquear a thread se a interface estiver ocupada.
             pass
 
     def start(self):
@@ -502,7 +616,6 @@ class HUD:
             import cv2
             import mss
             import numpy as np
-            from rastreamento_rapido import FluxoRapido
             tracker = FluxoRapido()
             previous_generation = -1
             with mss.mss() as screen:
@@ -570,6 +683,7 @@ class HUD:
                 # Corrige desvio acumulado do fluxo, mas não reinicia a cada quadro.
                 if agora - self.last_flow_seed_at > 1.2:
                     self._set_flow_seed(melhor["box"])
+                return  # O fluxo rápido continua guiando a posição entre inferências.
             elif agora - self.yolo_last_confirmed < 1.1:
                 return
             else:
@@ -678,29 +792,9 @@ class HUD:
                     self.release_target()
         except queue.Empty:
             pass
+
+        # Dá prioridade às coordenadas recentes do fluxo óptico.
         try:
-            while True:
-                kind, payload = self.messages.get_nowait()
-                if kind == "frame":
-                    self.latest_frame, self.latest_boxes = payload
-                    self._acompanhar_quadro(*payload)
-                    now = time.monotonic()
-                    if now - self.last_draw_at >= 0.125:
-                        self._draw(*payload)
-                        self.last_draw_at = now
-                elif kind == "message":
-                    self.info.set(payload)
-                elif kind == "error":
-                    self.info.set(payload)
-                    messagebox.showerror("HUD V8", payload)
-                elif kind == "done":
-                    self.running = False
-                    self.following = False
-                    self.active_box = None
-        except queue.Empty:
-            pass
-        try:
-            # Processa somente a medição mais recente, evitando fila atrasada.
             while True:
                 generation, box, frame_shape = self.flow_queue.get_nowait()
                 with self.flow_lock:
@@ -710,9 +804,50 @@ class HUD:
                     self.last_target_box = box
                     self.last_target_at = time.monotonic()
                     self.fast_last_at = time.monotonic()
+                    self.fast_frames_seen += 1
                     self._move_camera_for_box(box, frame_shape)
         except queue.Empty:
             pass
+
+        # O detector YOLO usa sua própria fila, sem bloquear o rastreador rápido.
+        try:
+            payload = self.frame_queue.get_nowait()
+            self.latest_frame, self.latest_boxes = payload
+            self.yolo_frames_seen += 1
+            self._acompanhar_quadro(*payload)
+            now = time.monotonic()
+            if now - self.last_draw_at >= .125:
+                self._draw(*payload)
+                self.last_draw_at = now
+        except queue.Empty:
+            pass
+
+        try:
+            while True:
+                kind, payload = self.messages.get_nowait()
+                if kind == "message":
+                    self.info.set(payload)
+                elif kind == "error":
+                    self.info.set(payload)
+                    messagebox.showerror("HUD V8", payload)
+                elif kind == "done":
+                    self.stop_event.set()
+                    self.running = False
+                    self.following = False
+                    self.active_box = None
+        except queue.Empty:
+            pass
+
+        now = time.monotonic()
+        elapsed = now - self.metrics_started_at
+        if elapsed >= 1.5:
+            self.metrics.set(
+                f"YOLO: {self.yolo_frames_seen/elapsed:.1f} FPS | "
+                f"Fluxo: {self.fast_frames_seen/elapsed:.1f} FPS"
+            )
+            self.yolo_frames_seen = 0
+            self.fast_frames_seen = 0
+            self.metrics_started_at = now
         self.root.after(20, self._poll)
 
     def close(self):
