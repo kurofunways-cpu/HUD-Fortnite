@@ -1,4 +1,4 @@
-"""HUD Aliado V4 — rastreamento visual e controle EXPERIMENTAL de mouse.
+"""HUD V7 — aquisição automática contínua e controle EXPERIMENTAL de mouse.
 
 Não lê memória, não injeta código e não contorna anticheat. O Fortnite pode
 ignorar os eventos de mouse. Use por sua conta e risco; pode violar as regras.
@@ -63,7 +63,7 @@ def choose_box(detections, x, y):
 class HUD:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("HUD V6 | Alvo automático")
+        self.root.title("HUD V7 | Rastreamento automático")
         self.root.geometry("1030x790+90+70")
         self.root.minsize(1000, 760)
         self.root.configure(bg=DARK)
@@ -87,8 +87,12 @@ class HUD:
         self.enable_mouse = tk.BooleanVar(value=True)
         self.only_fortnite = tk.BooleanVar(value=True)
         self.ignore_self = tk.BooleanVar(value=True)
-        self.mouse_gain = tk.DoubleVar(value=0.12)
+        self.mouse_gain = tk.DoubleVar(value=0.26)
         self.smooth_target = None
+        self.active_box = None
+        self.last_target_box = None
+        self.last_target_at = 0.0
+        self.last_draw_at = 0.0
         self.control_info = tk.StringVar(value="Controle de câmera: desligado")
         self.last_move_at = 0.0
         self.mouse_failure_warned = False
@@ -110,7 +114,7 @@ class HUD:
         header = tk.Frame(self.root, bg="#253650", height=50)
         header.pack(fill="x", padx=8, pady=(8, 0))
         header.pack_propagate(False)
-        title = self._label(header, "  HUD V6  •  seleção automática + YOLO + BoT-SORT", ("Segoe UI", 13, "bold"), bg="#253650")
+        title = self._label(header, "  HUD V7  •  rastreamento contínuo + YOLO + BoT-SORT", ("Segoe UI", 13, "bold"), bg="#253650")
         title.pack(side="left", pady=9)
         self._button(header, "— Minimizar", self.root.iconify).pack(side="right", padx=6, pady=4)
         self._button(header, "× Fechar", self.close, "#683041").pack(side="right", pady=4)
@@ -129,10 +133,10 @@ class HUD:
         self._button(row, "Escolher vídeo", self.select_video).pack(side="left", padx=8)
         self._button(row, "▶ Iniciar prévia", self.start, "#1b6658").pack(side="left", padx=8)
         self._button(row, "■ Parar", self.stop).pack(side="left")
-        self._button(row, "P: Travar / soltar", self.toggle_follow).pack(side="left", padx=8)
+        self._button(row, "P: Pausar / retomar", self.toggle_follow).pack(side="left", padx=8)
 
         self.info = tk.StringVar(value="Pronto. Escolha uma fonte e clique em Iniciar prévia.")
-        self._label(self.root, "P seleciona automaticamente personagem próximo da mira; ESC solta.",
+        self._label(self.root, "Acompanha automaticamente após iniciar a prévia. P pausa/retoma; ESC pausa.",
                     ("Segoe UI", 10), fg="#9ad3f6").pack(anchor="w", padx=17)
         settings = tk.Frame(self.root, bg=DARK)
         settings.pack(fill="x", padx=16, pady=(3, 7))
@@ -148,11 +152,11 @@ class HUD:
         speed = tk.Frame(self.root, bg=DARK)
         speed.pack(fill="x", padx=16, pady=(0, 3))
         self._label(speed, "Velocidade da câmera:").pack(side="left")
-        tk.Scale(speed, from_=0.03, to=0.48, resolution=0.01, orient="horizontal",
+        tk.Scale(speed, from_=0.05, to=0.65, resolution=0.01, orient="horizontal",
                  length=270, variable=self.mouse_gain, bg=DARK, fg=TEXT,
                  highlightthickness=0, troughcolor=PANEL).pack(side="left")
         self._button(speed, "Testar mouse no Windows", self.test_mouse).pack(side="left", padx=8)
-        self._label(speed, "ESC solta; P liga/desliga.",
+        self._label(speed, "ESC pausa; P pausa/retoma.",
                     ("Segoe UI", 9), fg="#f8c58c").pack(side="left", padx=10)
 
         self.canvas = tk.Canvas(self.root, width=PREVIEW_W, height=PREVIEW_H,
@@ -253,15 +257,19 @@ class HUD:
             if not self.video_path:
                 return
         self.stop_event.clear()
-        self.following = False
+        self.following = True
         self.selected_id = None
         self.smooth_target = None
+        self.active_box = None
+        self.last_target_box = None
+        self.last_target_at = 0.0
+        self.last_draw_at = 0.0
         self.latest_boxes = []
         self.running = True
         src, path = self.source.get(), self.video_path
         self.thread = threading.Thread(target=self._worker, args=(src, path), daemon=True)
         self.thread.start()
-        self.info.set("Preparando modelo de IA. O primeiro uso precisa de internet...")
+        self.info.set("Rastreamento automático ligado. Preparando o modelo de IA...")
 
     def _worker(self, source, path):
         capture = None
@@ -271,7 +279,9 @@ class HUD:
             import numpy as np
             from ultralytics import YOLO
             model = YOLO("yolo11n.pt")
-            self._post("message", "Modelo pronto. Detectando pessoas na imagem...")
+            import torch
+            device = 0 if torch.cuda.is_available() else "cpu"
+            self._post("message", f"Modelo pronto (dispositivo: {device}). Rastreamento automático ativo.")
             if source == "video":
                 capture = cv2.VideoCapture(path)
                 if not capture.isOpened():
@@ -291,8 +301,8 @@ class HUD:
                         frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
                     frame = resize_for_model(frame)
                     results = model.track(frame, persist=True, tracker="botsort.yaml",
-                                          classes=[0], conf=0.30, imgsz=640, verbose=False,
-                                          device="cpu")
+                                          classes=[0], conf=0.25, imgsz=640, verbose=False,
+                                          device=device)
                     dets = parse_yolo_detections(results[0])
                     self._post("frame", (frame, dets))
                     # Limite de atualização sem prometer taxa de quadros específica.
@@ -313,30 +323,36 @@ class HUD:
         self.stop_event.set()
         self.following = False
         self.selected_id = None
+        self.smooth_target = None
+        self.last_target_box = None
+        self.active_box = None
         self.info.set("Parando prévia e movimento de mouse...")
 
     def toggle_follow(self):
+        """P: pausa ou retoma o rastreamento (ligado por padrão após iniciar)."""
+        if not self.running:
+            self.info.set("Clique em Iniciar prévia antes de usar P.")
+            return
         if self.following:
             self.release_target()
             return
-        if not self.running:
-            self.info.set("Inicie a prévia antes de apertar P.")
-            return
+        self.following = True
         self.selected_id = None
         self.smooth_target = None
-        self.following = True
-        self.lost_frames = 0
+        self.last_target_box = None
+        self.active_box = None
+        self.last_target_at = 0.0
         self.mouse_failure_warned = False
-        if self.enable_mouse.get() and self.source.get() == "tela":
-            self.info.set("Alvo automático ativo; ESC interrompe.")
-        else:
-            self.info.set("Alvo automático: prévia visual, sem controle do mouse.")
+        self.info.set("Rastreamento retomado: buscando pessoa visível próxima da mira.")
 
     def release_target(self):
+        """P ou ESC: pausa imediatamente e libera o alvo anterior."""
         self.following = False
         self.selected_id = None
         self.smooth_target = None
-        self.info.set("ESC: acompanhamento interrompido. O mouse não será mais movido.")
+        self.last_target_box = None
+        self.active_box = None
+        self.info.set("Pausado. Pressione P para retomar.")
 
     def pick_target(self, event):
         if self.preview_mapping is None:
@@ -370,36 +386,87 @@ class HUD:
         return filtered
 
     def _selecionar_automaticamente(self, detections, frame_shape):
-        """Mantém um ID; procura o mais próximo do centro quando necessário."""
+        """Mantém um alvo por ID; se o ID mudar, tenta reassociar pela posição.
+
+        Quando ele some, aguarda 0,45 s antes de buscar outra pessoa.
+        Não identifica equipes e não garante identidade em oclusões.
+        """
         h, w = frame_shape[:2]
-        validos = [d for d in detections if d["id"] is not None]
-        if self.selected_id is not None:
-            atual = next((d for d in validos if d["id"] == self.selected_id), None)
-            if atual is not None:
-                self.lost_frames = 0
-                return atual
-            self.lost_frames += 1
-            if self.lost_frames <= 5:
-                return None
-            self.selected_id = None
-            self.smooth_target = None
-        self.lost_frames = 0
-        if not validos:
-            return None
-        cx, cy = w / 2, h / 2
-        limite = 0.83 * ((cx * cx + cy * cy) ** 0.5)
-        candidatos = []
-        for d in validos:
-            x1, y1, x2, y2 = d["box"]
-            alvo_x, alvo_y = (x1 + x2) / 2, y1 + (y2 - y1) * 0.46
-            distancia = ((alvo_x - cx) ** 2 + (alvo_y - cy) ** 2) ** 0.5
-            if distancia <= limite:
-                candidatos.append((distancia, -d["confidence"], d))
-        if not candidatos:
-            return None
-        melhor = min(candidatos, key=lambda item: item[:2])[2]
-        self.selected_id = melhor["id"]
-        return melhor
+        agora = time.monotonic()
+        validos = [d for d in detections
+                   if d["box"][2] > d["box"][0] and d["box"][3] > d["box"][1]]
+
+        escolhido = None
+        if self.last_target_box is not None:
+            lx1, ly1, lx2, ly2 = self.last_target_box
+            lcx, lcy = (lx1 + lx2) / 2, (ly1 + ly2) / 2
+            largura, altura = lx2 - lx1, ly2 - ly1
+            raio = max(52.0, min(w * 0.23, largura * 2.1))
+            raio_id = max(raio * 1.6, w * 0.28)
+
+            # O ID é preferido, mas rejeitamos saltos grandes e improváveis.
+            if self.selected_id is not None:
+                for det in validos:
+                    if det["id"] != self.selected_id:
+                        continue
+                    x1, y1, x2, y2 = det["box"]
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                    if ((cx - lcx) ** 2 + (cy - lcy) ** 2) ** 0.5 <= raio_id:
+                        escolhido = det
+                        break
+
+            # Recupera o alvo perto da última posição se o rastreador trocar ID.
+            if escolhido is None:
+                candidatos = []
+                for det in validos:
+                    x1, y1, x2, y2 = det["box"]
+                    cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+                    dist = ((cx - lcx) ** 2 + (cy - lcy) ** 2) ** 0.5
+                    det_largura, det_altura = x2 - x1, y2 - y1
+                    proporcao = min(altura, det_altura) / max(altura, det_altura)
+                    if dist <= raio and proporcao >= 0.48:
+                        candidatos.append((dist, -det["confidence"], det))
+                if candidatos:
+                    escolhido = min(candidatos, key=lambda item: item[:2])[2]
+
+            if escolhido is None:
+                if agora - self.last_target_at < 0.45:
+                    return None
+                self.selected_id = None
+                self.last_target_box = None
+                self.smooth_target = None
+
+        if escolhido is None and validos:
+            centro_x, centro_y = w / 2, h / 2
+            distancia_max = 0.83 * ((centro_x ** 2 + centro_y ** 2) ** 0.5)
+            candidatos = []
+            for det in validos:
+                x1, y1, x2, y2 = det["box"]
+                cx, cy = (x1 + x2) / 2, y1 + (y2 - y1) * 0.46
+                distancia = ((cx - centro_x) ** 2 + (cy - centro_y) ** 2) ** 0.5
+                if distancia <= distancia_max:
+                    candidatos.append((distancia, -det["confidence"], det))
+            if candidatos:
+                escolhido = min(candidatos, key=lambda item: item[:2])[2]
+
+        if escolhido is not None:
+            if self.selected_id != escolhido["id"]:
+                self.smooth_target = None
+            self.selected_id = escolhido["id"]
+            self.last_target_box = escolhido["box"]
+            self.last_target_at = agora
+        return escolhido
+
+    def _acompanhar_quadro(self, frame, detections):
+        """Atualiza alvo e mouse em cada frame, sem esperar desenhar a prévia."""
+        if not self.following:
+            self.active_box = None
+            return
+        filtrados = self._filtered_detections(detections, frame.shape)
+        escolhido = self._selecionar_automaticamente(filtrados, frame.shape)
+        self.active_box = escolhido["box"] if escolhido else None
+        if self.active_box is not None:
+            self._move_camera_for_box(self.active_box, frame.shape)
 
     def _move_camera_for_box(self, box, frame_shape):
         if not self.following or not self.enable_mouse.get() or self.source.get() != "tela":
@@ -412,22 +479,25 @@ class HUD:
             return
         # Evita enviar entradas em alta frequência, que causariam trepidação.
         now = time.monotonic()
-        if now-self.last_move_at < .065:
+        if now-self.last_move_at < .020:
             return
         h, w = frame_shape[:2]
         x1, y1, x2, y2 = box
         # Mira aproximadamente no centro visual do corpo, não em um ponto hostil.
         target_x = (x1+x2)/2
         target_y = y1+(y2-y1)*.46
+        # Correção rápida quando longe; mais suave quando quase centralizado.
+        erro_maior = max(abs(target_x - w / 2), abs(target_y - h / 2))
+        alpha = 0.87 if erro_maior > 110 else (0.70 if erro_maior > 35 else 0.48)
         if self.smooth_target is None:
             self.smooth_target = (target_x, target_y)
         else:
             sx, sy = self.smooth_target
-            self.smooth_target = (sx * 0.70 + target_x * 0.30,
-                                  sy * 0.70 + target_y * 0.30)
+            self.smooth_target = (sx * (1 - alpha) + target_x * alpha,
+                                  sy * (1 - alpha) + target_y * alpha)
         target_x, target_y = self.smooth_target
         dx, dy = calcular_passo(target_x-w/2, target_y-h/2,
-                               ganho=self.mouse_gain.get(), limite=24, zona_morta=10)
+                               ganho=self.mouse_gain.get(), limite=60, zona_morta=6)
         if dx == 0 and dy == 0:
             return
         ok = mover_relativo(dx, dy)
@@ -449,11 +519,10 @@ class HUD:
         annotated = frame.copy()
         detections = self._filtered_detections(detections, frame.shape)
         h, w = annotated.shape[:2]
-        escolhido = self._selecionar_automaticamente(detections, frame.shape) if self.following else None
-        selected_box = escolhido["box"] if escolhido is not None else None
+        selected_box = self.active_box if self.following else None
         for det in detections:
             x1, y1, x2, y2 = det["box"]
-            selected = self.selected_id is not None and det["id"] == self.selected_id
+            selected = selected_box is not None and det["box"] == selected_box
             color = (10, 212, 255) if selected else (120, 230, 100)
             cv2.rectangle(annotated, (x1, y1), (x2, y2), color, 3 if selected else 2)
             tag = str(det["id"]) if det["id"] is not None else "sem ID"
@@ -467,11 +536,7 @@ class HUD:
             x1, y1, x2, y2 = selected_box
             aim = ((x1 + x2) // 2, (y1 + y2) // 2)
             cv2.arrowedLine(annotated, center, aim, (10, 212, 255), 2, tipLength=.15)
-            self.lost_frames = 0
-            self._move_camera_for_box(selected_box, frame.shape)
-        elif self.following:
-            # Aguarda novas detecções para adquirir outro alvo.
-            pass
+            # O movimento é tratado antes da renderização, em _acompanhar_quadro.
         scale = min(PREVIEW_W / w, PREVIEW_H / h)
         dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
         dx, dy = (PREVIEW_W - dw) // 2, (PREVIEW_H - dh) // 2
@@ -497,18 +562,23 @@ class HUD:
                 kind, payload = self.messages.get_nowait()
                 if kind == "frame":
                     self.latest_frame, self.latest_boxes = payload
-                    self._draw(*payload)
+                    self._acompanhar_quadro(*payload)
+                    now = time.monotonic()
+                    if now - self.last_draw_at >= 0.125:
+                        self._draw(*payload)
+                        self.last_draw_at = now
                 elif kind == "message":
                     self.info.set(payload)
                 elif kind == "error":
                     self.info.set(payload)
-                    messagebox.showerror("HUD Aliado V4", payload)
+                    messagebox.showerror("HUD V7", payload)
                 elif kind == "done":
                     self.running = False
                     self.following = False
+                    self.active_box = None
         except queue.Empty:
             pass
-        self.root.after(70, self._poll)
+        self.root.after(20, self._poll)
 
     def close(self):
         self.stop_event.set()
