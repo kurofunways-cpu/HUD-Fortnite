@@ -1,0 +1,13 @@
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+title Atualizar HUD Fortnite
+echo Feche o HUD antes de continuar.
+echo.
+if exist ".venv\Scripts\python.exe" (
+    ".venv\Scripts\python.exe" atualizar.py
+) else (
+    py -3.12 atualizar.py
+)
+if errorlevel 1 echo.
+pause
