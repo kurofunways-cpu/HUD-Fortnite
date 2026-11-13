@@ -40,7 +40,7 @@ def baixar(url: str) -> bytes:
 
 def sha_git(dados: bytes) -> str:
     # GitHub usa o hash do objeto Git: "blob <tamanho>\\0<conteúdo>".
-    cabecalho = f"blob {len(dados)}".encode("ascii") + b"\\x00"
+    cabecalho = f"blob {len(dados)}".encode("ascii") + bytes([0])
     return hashlib.sha1(cabecalho + dados).hexdigest()
 
 
@@ -92,7 +92,7 @@ def executar() -> int:
             os.replace(tmp / nome, BASE / nome)
             print("Atualizado:", nome)
 
-    print("\\nAtualização concluída; seu ambiente .venv foi preservado.")
+    print("Atualização concluída; seu ambiente .venv foi preservado.")
     if "requirements.txt" in pendentes:
         print("As dependências mudaram. Execute instalar.bat antes de iniciar.")
     return 0
