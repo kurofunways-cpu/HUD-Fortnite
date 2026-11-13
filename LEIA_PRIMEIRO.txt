@@ -1,0 +1,24 @@
+HUD ALIADO V4 — rastreamento visual com controle EXPERIMENTAL de mouse
+
+COMO INSTALAR
+1. Extraia o ZIP em uma pasta nova.
+2. Execute instalar.bat (é preciso Python 3.12, comando: py install 3.12).
+3. Execute iniciar.bat.
+4. No aplicativo selecione Tela ao vivo e inicie a prévia.
+5. Na PRÉVIA, clique no quadro de uma pessoa visível que VOCÊ sabe que é aliada.
+6. Marque Mover câmera (experimental). Recomenda-se manter Só com Fortnite em foco.
+7. Volte ao jogo e pressione P. ESC para soltar o alvo imediatamente.
+
+IMPORTANTE
+- A V4 tenta enviar movimentos relativos de mouse para a janela ativa; o Fortnite
+  pode ignorá-los. Não garante controle da câmera no Battle Royale.
+- O detector YOLO genérico reconhece pessoas, não identifica times ou aliados.
+- Ignorar personagem central é apenas uma heurística; pode errar.
+- A prévia pode continuar detectando pessoas mesmo que a câmera não se mova.
+- Funciona apenas no Windows para movimento de mouse.
+- Não lê memória de processos, não injeta código, não contorna o anticheat.
+- O uso de automação em jogos online pode violar as regras e causar punições.
+- Não desative Smart App Control, Defender ou o anticheat para rodar este teste.
+- Para ver se o movimento funciona, comece com velocidade baixa (0.08-0.14).
+- Tentar usar o HUD na mesma tela cobrirá partes do jogo; minimize a janela após
+  escolher o alvo. O rastreamento depende do marcador continuar visível.
