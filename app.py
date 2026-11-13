@@ -63,7 +63,7 @@ def choose_box(detections, x, y):
 class HUD:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("HUD Aliado V4 | Câmera experimental")
+        self.root.title("HUD V6 | Alvo automático")
         self.root.geometry("1030x790+90+70")
         self.root.minsize(1000, 760)
         self.root.configure(bg=DARK)
@@ -84,10 +84,11 @@ class HUD:
         self.last_photo = None
         self.running = False
         self.drag_origin = None
-        self.enable_mouse = tk.BooleanVar(value=False)
+        self.enable_mouse = tk.BooleanVar(value=True)
         self.only_fortnite = tk.BooleanVar(value=True)
         self.ignore_self = tk.BooleanVar(value=True)
-        self.mouse_gain = tk.DoubleVar(value=0.14)
+        self.mouse_gain = tk.DoubleVar(value=0.12)
+        self.smooth_target = None
         self.control_info = tk.StringVar(value="Controle de câmera: desligado")
         self.last_move_at = 0.0
         self.mouse_failure_warned = False
@@ -109,7 +110,7 @@ class HUD:
         header = tk.Frame(self.root, bg="#253650", height=50)
         header.pack(fill="x", padx=8, pady=(8, 0))
         header.pack_propagate(False)
-        title = self._label(header, "  HUD ALIADO V4  •  YOLO + BoT-SORT + mouse", ("Segoe UI", 13, "bold"), bg="#253650")
+        title = self._label(header, "  HUD V6  •  seleção automática + YOLO + BoT-SORT", ("Segoe UI", 13, "bold"), bg="#253650")
         title.pack(side="left", pady=9)
         self._button(header, "— Minimizar", self.root.iconify).pack(side="right", padx=6, pady=4)
         self._button(header, "× Fechar", self.close, "#683041").pack(side="right", pady=4)
@@ -131,7 +132,7 @@ class HUD:
         self._button(row, "P: Travar / soltar", self.toggle_follow).pack(side="left", padx=8)
 
         self.info = tk.StringVar(value="Pronto. Escolha uma fonte e clique em Iniciar prévia.")
-        self._label(self.root, "Clique na caixa de um personagem para selecioná-lo. P trava/solta; ESC solta.",
+        self._label(self.root, "P seleciona automaticamente personagem próximo da mira; ESC solta.",
                     ("Segoe UI", 10), fg="#9ad3f6").pack(anchor="w", padx=17)
         settings = tk.Frame(self.root, bg=DARK)
         settings.pack(fill="x", padx=16, pady=(3, 7))
@@ -157,7 +158,7 @@ class HUD:
         self.canvas = tk.Canvas(self.root, width=PREVIEW_W, height=PREVIEW_H,
                                 highlightthickness=1, highlightbackground="#466079", bg="#090e16")
         self.canvas.pack(padx=12)
-        self.canvas.bind("<Button-1>", self.pick_target)
+        # Sem seleção manual necessária
         self.canvas.create_text(PREVIEW_W // 2, PREVIEW_H // 2,
                                 text="A prévia aparece aqui depois de iniciar", fill="#87a0b7",
                                 font=("Segoe UI", 16))
@@ -254,6 +255,7 @@ class HUD:
         self.stop_event.clear()
         self.following = False
         self.selected_id = None
+        self.smooth_target = None
         self.latest_boxes = []
         self.running = True
         src, path = self.source.get(), self.video_path
@@ -320,19 +322,20 @@ class HUD:
         if not self.running:
             self.info.set("Inicie a prévia antes de apertar P.")
             return
-        if self.selected_id is None:
-            self.info.set("Clique em uma caixa detectada para selecionar o personagem; depois aperte P.")
-            return
+        self.selected_id = None
+        self.smooth_target = None
         self.following = True
         self.lost_frames = 0
         self.mouse_failure_warned = False
         if self.enable_mouse.get() and self.source.get() == "tela":
-            self.info.set(f"ID {self.selected_id}: controle de mouse ATIVO. Volte ao Fortnite; ESC interrompe.")
+            self.info.set("Alvo automático ativo; ESC interrompe.")
         else:
-            self.info.set(f"ID {self.selected_id}: apenas acompanhamento visual (ative Mover câmera).")
+            self.info.set("Alvo automático: prévia visual, sem controle do mouse.")
 
     def release_target(self):
         self.following = False
+        self.selected_id = None
+        self.smooth_target = None
         self.info.set("ESC: acompanhamento interrompido. O mouse não será mais movido.")
 
     def pick_target(self, event):
@@ -366,6 +369,38 @@ class HUD:
                 filtered.append(det)
         return filtered
 
+    def _selecionar_automaticamente(self, detections, frame_shape):
+        """Mantém um ID; procura o mais próximo do centro quando necessário."""
+        h, w = frame_shape[:2]
+        validos = [d for d in detections if d["id"] is not None]
+        if self.selected_id is not None:
+            atual = next((d for d in validos if d["id"] == self.selected_id), None)
+            if atual is not None:
+                self.lost_frames = 0
+                return atual
+            self.lost_frames += 1
+            if self.lost_frames <= 5:
+                return None
+            self.selected_id = None
+            self.smooth_target = None
+        self.lost_frames = 0
+        if not validos:
+            return None
+        cx, cy = w / 2, h / 2
+        limite = 0.83 * ((cx * cx + cy * cy) ** 0.5)
+        candidatos = []
+        for d in validos:
+            x1, y1, x2, y2 = d["box"]
+            alvo_x, alvo_y = (x1 + x2) / 2, y1 + (y2 - y1) * 0.46
+            distancia = ((alvo_x - cx) ** 2 + (alvo_y - cy) ** 2) ** 0.5
+            if distancia <= limite:
+                candidatos.append((distancia, -d["confidence"], d))
+        if not candidatos:
+            return None
+        melhor = min(candidatos, key=lambda item: item[:2])[2]
+        self.selected_id = melhor["id"]
+        return melhor
+
     def _move_camera_for_box(self, box, frame_shape):
         if not self.following or not self.enable_mouse.get() or self.source.get() != "tela":
             return
@@ -384,8 +419,15 @@ class HUD:
         # Mira aproximadamente no centro visual do corpo, não em um ponto hostil.
         target_x = (x1+x2)/2
         target_y = y1+(y2-y1)*.46
+        if self.smooth_target is None:
+            self.smooth_target = (target_x, target_y)
+        else:
+            sx, sy = self.smooth_target
+            self.smooth_target = (sx * 0.70 + target_x * 0.30,
+                                  sy * 0.70 + target_y * 0.30)
+        target_x, target_y = self.smooth_target
         dx, dy = calcular_passo(target_x-w/2, target_y-h/2,
-                               ganho=self.mouse_gain.get(), limite=36, zona_morta=14)
+                               ganho=self.mouse_gain.get(), limite=24, zona_morta=10)
         if dx == 0 and dy == 0:
             return
         ok = mover_relativo(dx, dy)
@@ -407,7 +449,8 @@ class HUD:
         annotated = frame.copy()
         detections = self._filtered_detections(detections, frame.shape)
         h, w = annotated.shape[:2]
-        selected_box = None
+        escolhido = self._selecionar_automaticamente(detections, frame.shape) if self.following else None
+        selected_box = escolhido["box"] if escolhido is not None else None
         for det in detections:
             x1, y1, x2, y2 = det["box"]
             selected = self.selected_id is not None and det["id"] == self.selected_id
@@ -417,8 +460,6 @@ class HUD:
             cv2.putText(annotated, f"ID {tag} - {det['confidence']:.2f}",
                         (max(0, x1), max(18, y1 - 8)), cv2.FONT_HERSHEY_SIMPLEX,
                         .55, color, 2, cv2.LINE_AA)
-            if selected:
-                selected_box = det["box"]
         center = (w // 2, h // 2)
         cv2.drawMarker(annotated, center, (225, 225, 225), markerType=cv2.MARKER_CROSS,
                        markerSize=22, thickness=2)
@@ -429,10 +470,8 @@ class HUD:
             self.lost_frames = 0
             self._move_camera_for_box(selected_box, frame.shape)
         elif self.following:
-            self.lost_frames += 1
-            if self.lost_frames > 15:
-                self.following = False
-                self.info.set("Alvo perdido. Selecione novamente um personagem.")
+            # Aguarda novas detecções para adquirir outro alvo.
+            pass
         scale = min(PREVIEW_W / w, PREVIEW_H / h)
         dw, dh = max(1, round(w * scale)), max(1, round(h * scale))
         dx, dy = (PREVIEW_W - dw) // 2, (PREVIEW_H - dh) // 2
