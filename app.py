@@ -1,4 +1,4 @@
-"""HUD V7 — aquisição automática contínua e controle EXPERIMENTAL de mouse.
+"""HUD V8 — rastreamento híbrido YOLO + fluxo óptico com controle EXPERIMENTAL.
 
 Não lê memória, não injeta código e não contorna anticheat. O Fortnite pode
 ignorar os eventos de mouse. Use por sua conta e risco; pode violar as regras.
@@ -63,7 +63,7 @@ def choose_box(detections, x, y):
 class HUD:
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("HUD V7 | Rastreamento automático")
+        self.root.title("HUD V8 | Rastreamento híbrido")
         self.root.geometry("1030x790+90+70")
         self.root.minsize(1000, 760)
         self.root.configure(bg=DARK)
@@ -93,6 +93,16 @@ class HUD:
         self.last_target_box = None
         self.last_target_at = 0.0
         self.last_draw_at = 0.0
+        self.fast_thread = None
+        self.flow_lock = threading.Lock()
+        self.flow_generation = 0
+        self.flow_seed_box = None
+        self.flow_queue = queue.Queue(maxsize=1)
+        self.fast_last_at = 0.0
+        self.yolo_last_confirmed = 0.0
+        self.last_flow_seed_at = 0.0
+        self.yolo_frames_seen = 0
+        self.fast_frames_seen = 0
         self.control_info = tk.StringVar(value="Controle de câmera: desligado")
         self.last_move_at = 0.0
         self.mouse_failure_warned = False
@@ -114,7 +124,7 @@ class HUD:
         header = tk.Frame(self.root, bg="#253650", height=50)
         header.pack(fill="x", padx=8, pady=(8, 0))
         header.pack_propagate(False)
-        title = self._label(header, "  HUD V7  •  rastreamento contínuo + YOLO + BoT-SORT", ("Segoe UI", 13, "bold"), bg="#253650")
+        title = self._label(header, "  HUD V8  •  YOLO + fluxo óptico rápido", ("Segoe UI", 13, "bold"), bg="#253650")
         title.pack(side="left", pady=9)
         self._button(header, "— Minimizar", self.root.iconify).pack(side="right", padx=6, pady=4)
         self._button(header, "× Fechar", self.close, "#683041").pack(side="right", pady=4)
@@ -156,7 +166,7 @@ class HUD:
                  length=270, variable=self.mouse_gain, bg=DARK, fg=TEXT,
                  highlightthickness=0, troughcolor=PANEL).pack(side="left")
         self._button(speed, "Testar mouse no Windows", self.test_mouse).pack(side="left", padx=8)
-        self._label(speed, "ESC pausa; P pausa/retoma.",
+        self._label(speed, "P pausa/retoma; ESC pausa.",
                     ("Segoe UI", 9), fg="#f8c58c").pack(side="left", padx=10)
 
         self.canvas = tk.Canvas(self.root, width=PREVIEW_W, height=PREVIEW_H,
@@ -265,11 +275,21 @@ class HUD:
         self.last_target_at = 0.0
         self.last_draw_at = 0.0
         self.latest_boxes = []
+        self.fast_last_at = 0.0
+        self.yolo_last_confirmed = 0.0
+        self.last_flow_seed_at = 0.0
+        with self.flow_lock:
+            self.flow_generation += 1
+            self.flow_seed_box = None
+        self.flow_queue = queue.Queue(maxsize=1)
         self.running = True
         src, path = self.source.get(), self.video_path
         self.thread = threading.Thread(target=self._worker, args=(src, path), daemon=True)
         self.thread.start()
-        self.info.set("Rastreamento automático ligado. Preparando o modelo de IA...")
+        if src == "tela":
+            self.fast_thread = threading.Thread(target=self._fast_worker, daemon=True)
+            self.fast_thread.start()
+        self.info.set("Rastreamento híbrido ativo. Iniciando IA e fluxo óptico...")
 
     def _worker(self, source, path):
         capture = None
@@ -301,7 +321,7 @@ class HUD:
                         frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
                     frame = resize_for_model(frame)
                     results = model.track(frame, persist=True, tracker="botsort.yaml",
-                                          classes=[0], conf=0.25, imgsz=640, verbose=False,
+                                          classes=[0], conf=0.25, imgsz=512, verbose=False,
                                           device=device)
                     dets = parse_yolo_detections(results[0])
                     self._post("frame", (frame, dets))
@@ -321,6 +341,9 @@ class HUD:
 
     def stop(self):
         self.stop_event.set()
+        with self.flow_lock:
+            self.flow_generation += 1
+            self.flow_seed_box = None
         self.following = False
         self.selected_id = None
         self.smooth_target = None
@@ -342,8 +365,12 @@ class HUD:
         self.last_target_box = None
         self.active_box = None
         self.last_target_at = 0.0
+        self.fast_last_at = 0.0
+        with self.flow_lock:
+            self.flow_generation += 1
+            self.flow_seed_box = None
         self.mouse_failure_warned = False
-        self.info.set("Rastreamento retomado: buscando pessoa visível próxima da mira.")
+        self.info.set("Rastreamento retomado: procurando personagem visível.")
 
     def release_target(self):
         """P ou ESC: pausa imediatamente e libera o alvo anterior."""
@@ -352,6 +379,10 @@ class HUD:
         self.smooth_target = None
         self.last_target_box = None
         self.active_box = None
+        self.fast_last_at = 0.0
+        with self.flow_lock:
+            self.flow_generation += 1
+            self.flow_seed_box = None
         self.info.set("Pausado. Pressione P para retomar.")
 
     def pick_target(self, event):
@@ -457,16 +488,106 @@ class HUD:
             self.last_target_at = agora
         return escolhido
 
+    def _set_flow_seed(self, box):
+        """Envia uma caixa do YOLO ao rastreador de fluxo óptico."""
+        with self.flow_lock:
+            self.flow_generation += 1
+            self.flow_seed_box = box
+        self.last_flow_seed_at = time.monotonic()
+        self.fast_last_at = 0.0
+
+    def _fast_worker(self):
+        """Captura em alta frequência sem esperar as inferências do YOLO."""
+        try:
+            import cv2
+            import mss
+            import numpy as np
+            from rastreamento_rapido import FluxoRapido
+            tracker = FluxoRapido()
+            previous_generation = -1
+            with mss.mss() as screen:
+                monitor = screen.monitors[1]
+                while not self.stop_event.is_set():
+                    start_at = time.monotonic()
+                    if not self.following:
+                        tracker.reset()
+                        self.stop_event.wait(0.07)
+                        continue
+                    with self.flow_lock:
+                        generation = self.flow_generation
+                        seed_box = self.flow_seed_box
+                    shot = np.asarray(screen.grab(monitor))
+                    frame = cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR)
+                    frame = resize_for_model(frame)
+                    if previous_generation != generation:
+                        previous_generation = generation
+                        tracker.reset()
+                        if seed_box is not None:
+                            tracker.seed(frame, seed_box)
+                    elif seed_box is not None:
+                        box = tracker.update(frame)
+                        if box is not None:
+                            payload = (generation, box, frame.shape)
+                            try:
+                                while True:
+                                    self.flow_queue.get_nowait()
+                            except queue.Empty:
+                                pass
+                            try:
+                                self.flow_queue.put_nowait(payload)
+                            except queue.Full:
+                                pass
+                    self.stop_event.wait(max(.004, .033 - (time.monotonic() - start_at)))
+        except Exception as exc:
+            self._post("message", f"Fluxo óptico indisponível ({exc}). Continuando com YOLO.")
+
     def _acompanhar_quadro(self, frame, detections):
-        """Atualiza alvo e mouse em cada frame, sem esperar desenhar a prévia."""
+        """Usa YOLO para detectar e fluxo óptico para acompanhar entre inferências."""
         if not self.following:
             self.active_box = None
             return
         filtrados = self._filtered_detections(detections, frame.shape)
+        agora = time.monotonic()
+        fast_recente = (self.source.get() == "tela" and
+                        self.active_box is not None and
+                        agora - self.fast_last_at < .35)
+        if fast_recente:
+            # Confirma a posição de fluxo por uma nova detecção de pessoa.
+            x1, y1, x2, y2 = self.active_box
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            largura, altura = x2 - x1, y2 - y1
+            candidates = []
+            for det in filtrados:
+                a, b, d, e = det["box"]
+                tx, ty = (a + d) / 2, (b + e) / 2
+                distancia = ((cx - tx) ** 2 + (cy - ty) ** 2) ** .5
+                if distancia < max(45, largura * 1.4, altura * .65):
+                    candidates.append((distancia, det))
+            if candidates:
+                melhor = min(candidates, key=lambda item: item[0])[1]
+                self.selected_id = melhor["id"]
+                self.yolo_last_confirmed = agora
+                # Corrige desvio acumulado do fluxo, mas não reinicia a cada quadro.
+                if agora - self.last_flow_seed_at > 1.2:
+                    self._set_flow_seed(melhor["box"])
+            elif agora - self.yolo_last_confirmed < 1.1:
+                return
+            else:
+                self._set_flow_seed(None)
+                self.active_box = None
+                self.last_target_box = None
+                self.selected_id = None
+
         escolhido = self._selecionar_automaticamente(filtrados, frame.shape)
-        self.active_box = escolhido["box"] if escolhido else None
-        if self.active_box is not None:
-            self._move_camera_for_box(self.active_box, frame.shape)
+        if escolhido is None:
+            return
+        self.active_box = escolhido["box"]
+        self.yolo_last_confirmed = agora
+        self.last_target_box = escolhido["box"]
+        if self.source.get() == "tela":
+            self._set_flow_seed(self.active_box)
+        # Enquanto o fluxo inicializa, o YOLO também pode corrigir o mouse.
+        self._move_camera_for_box(self.active_box, frame.shape)
 
     def _move_camera_for_box(self, box, frame_shape):
         if not self.following or not self.enable_mouse.get() or self.source.get() != "tela":
@@ -571,11 +692,25 @@ class HUD:
                     self.info.set(payload)
                 elif kind == "error":
                     self.info.set(payload)
-                    messagebox.showerror("HUD V7", payload)
+                    messagebox.showerror("HUD V8", payload)
                 elif kind == "done":
                     self.running = False
                     self.following = False
                     self.active_box = None
+        except queue.Empty:
+            pass
+        try:
+            # Processa somente a medição mais recente, evitando fila atrasada.
+            while True:
+                generation, box, frame_shape = self.flow_queue.get_nowait()
+                with self.flow_lock:
+                    valido = generation == self.flow_generation
+                if valido and self.following and self.source.get() == "tela":
+                    self.active_box = box
+                    self.last_target_box = box
+                    self.last_target_at = time.monotonic()
+                    self.fast_last_at = time.monotonic()
+                    self._move_camera_for_box(box, frame_shape)
         except queue.Empty:
             pass
         self.root.after(20, self._poll)
